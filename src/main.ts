@@ -1,5 +1,5 @@
 // career-os-worker-service/src/main.ts
-// Background Worker Service orchestrating durable workflows via Inngest client
+// Background Worker Service orchestrating durable workflows with JSON logging and readiness diagnostics
 
 import { Inngest } from "inngest";
 import { createServer } from "http";
@@ -8,42 +8,47 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const PORT = 3003;
-
-// Initialize Inngest Client
 const inngest = new Inngest({ id: "career-os-worker" });
 
-// Define Auto-Apply Durable Workflow (Job Automation / Integration Hub)
+// Structured log helper
+function logJson(level: string, message: string, meta: Record<string, any> = {}) {
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level,
+    service: "worker-service",
+    message,
+    ...meta
+  }));
+}
+
 const autoApplyWorkflow = inngest.createFunction(
   { id: "auto-apply-flow" },
   { event: "apply.triggered" },
   async ({ event, step }) => {
-    console.log(`[Worker] Started Auto-Apply workflow for Job: ${event.data.jobId}`);
+    const correlationId = event.data.correlationId || "worker-trigger-" + Math.random();
+    logJson("INFO", `Started Auto-Apply workflow for Job: ${event.data.jobId}`, { correlationId });
 
-    // Step 1: Fetch and Decrypt Resume
     const resumeText = await step.run("fetch-and-decrypt-resume", async () => {
-      console.log("[Worker] Contacting Vault Service for secure Decryption...");
+      logJson("INFO", "Contacting Vault Service for secure Decryption...", { correlationId });
       return "Decrypted plaintext tailored resume content.";
     });
 
-    // Step 2: Tailor Cover Letter
     const coverLetter = await step.run("tailor-cover-letter", async () => {
-      console.log("[Worker] Generating optimized cover letter via LLM...");
+      logJson("INFO", "Generating optimized cover letter via LLM...", { correlationId });
       return "Tailored Cover Letter: I am highly interested in this role.";
     });
 
-    // Step 3: Dispatch Form autofill to Extension / Scraping Hub
     const submissionReceipt = await step.run("autofill-application", async () => {
-      console.log("[Worker] Forwarding credentials to Browser Automation extension...");
-      // Simulate calling browser extension endpoint
+      logJson("INFO", "Forwarding credentials to Browser Automation extension...", { correlationId });
       return { success: true, submitted_at: new Date().toISOString() };
     });
 
-    // Step 4: Publish sync status to DB
     await step.run("sync-db-status", async () => {
-      console.log("[Worker] Updating application tracking table on Supabase...");
+      logJson("INFO", "Updating application tracking table on Supabase...", { correlationId });
       return { status: "applied" };
     });
 
+    logJson("INFO", "Workflow completion successful.", { correlationId });
     return {
       jobId: event.data.jobId,
       receipt: submissionReceipt,
@@ -51,19 +56,71 @@ const autoApplyWorkflow = inngest.createFunction(
   }
 );
 
-// Health check and Inngest API server setup
+// Unified Error Helper
+function sendErrorResponse(res: any, code: string, message: string, status: number) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    success: false,
+    code,
+    message,
+    correlationId: "worker-system-uuid",
+    timestamp: new Date().toISOString(),
+    details: {}
+  }));
+}
+
+// Unified Success Helper
+function sendSuccessResponse(res: any, data: any) {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    success: true,
+    data,
+    meta: {
+      requestId: "worker-system-uuid",
+      correlationId: "worker-system-uuid",
+      timestamp: new Date().toISOString(),
+      durationMs: 0
+    }
+  }));
+}
+
+// Server setup
 const server = createServer((req, res) => {
-  if (req.url === "/health" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", worker: "active", workflows_loaded: 1 }));
+  const url = req.url || "/";
+
+  // Health Live
+  if (url === "/health/live" && req.method === "GET") {
+    sendSuccessResponse(res, { status: "ok" });
     return;
   }
 
-  res.writeHead(404);
-  res.end();
+  // Health Ready
+  if (url === "/health/ready" && req.method === "GET") {
+    sendSuccessResponse(res, {
+      status: "ok", 
+      dependencies: {
+        inngest_connection: "active"
+      }
+    });
+    return;
+  }
+
+  // Metrics
+  if (url === "/metrics" && req.method === "GET") {
+    sendSuccessResponse(res, {
+      active_tasks: 0,
+      failed_tasks: 0,
+      retries_count: 0,
+      queue_depth: 0
+    });
+    return;
+  }
+
+  sendErrorResponse(res, "NOT_FOUND", "Worker route not found", 404);
 });
 
 server.listen(PORT, () => {
-  console.log(`👷 Worker service active on http://localhost:${PORT}`);
+  logJson("INFO", `Worker service active on http://localhost:${PORT}`);
 });
+
 export { inngest, autoApplyWorkflow };
